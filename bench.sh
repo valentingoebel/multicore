@@ -1,1 +1,1 @@
-g++ communication.cpp -o communication -fopenmp && time ./communication
+g++ communication.cpp -o communication -std=c++17 -fopenmp && time ./communication
