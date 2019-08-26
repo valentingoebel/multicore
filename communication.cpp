@@ -44,6 +44,14 @@ int main() {
         }
     }
 
+    /*#pragma omp parallel
+    {
+        #pragma omp for
+        for(int i = 0; i < max_count; i++) {
+            counters[i].balance += 50;
+        }
+    }*/
+
     unsigned long start = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
     #pragma omp parallel
