@@ -6,6 +6,7 @@
 #include <shared_mutex>
 
 class Message;
+class ActorGroup;
 
 class Account {
 public:
@@ -25,9 +26,6 @@ public:
         reserved = a.reserved;
         max_balance = a.max_balance;
     }
-    void receive(Message& m) {
-        //TODO implement receiving functionality
-    }
     int target = 0;
     int balance = 0;
     int reserved = 0;
@@ -41,30 +39,40 @@ class Actor {
         Actor() {}
         Actor(Actor&& a) {}
         Actor(const Actor& a) {}
-        void receive(Message& m) {
-            //TODO implement receiving functionality
-        }
         mutable std::mutex mtx;
 };
 
 class Message {
     public:
+        Message(Account* target,
+            Account* sender,
+            int remainder,
+            int amount_over_balance,
+            void (*handler)(ActorGroup& actorGroup, Message& m, Account& target)) :
+            target(target),
+            sender(sender),
+            remainder(remainder),
+            amount_over_balance(amount_over_balance),
+            handler(handler) {}
         Account* target;
+        Account* sender;
+        int remainder;
+        int amount_over_balance;
+        void (*handler)(ActorGroup& actorGroup, Message& m, Account& target);
 };
 
 class ActorGroup {
     public:
-        ActorGroup() : actors(10000000, Account()) {}
+        ActorGroup() : actors(10000000, Account()) {
+            local_messages.reserve(10);
+        }
         std::vector<Account> actors; //TODO support multiple types of actors, messages, etc
         std::vector<Message> messages;
-        std::vector<Message> local_messages;
+        std::vector<Message> local_messages; //TODO threadlocal message boxes
+        mutable std::mutex mtx;
+
         int message_count = 0;
 
-        /*
-        actorGroup.process(actor, [] (Actor& a) {
-            cout << x * 50 << endl; return x * 100;
-        });
-        */
         template<typename Functor>
         void process(Account& actor, Functor function)
         {
@@ -80,7 +88,7 @@ class ActorGroup {
             return false;
         }
 
-        void send_message(Message& message) {
+        void send_message(const Message& message) {
             if(is_remote_actor(message.target)) {
                 messages.push_back(message);
             } else {
@@ -94,8 +102,9 @@ class ActorGroup {
                 Message& m = local_messages[i];
                 Account* a = m.target;
                 std::unique_lock<std::mutex> lock_to(a->mtx);
-                a->receive(m);
+                m.handler(*this, m, *a);
             }
+            message_count = 0;
             local_messages.clear();
         }
 
@@ -104,10 +113,9 @@ class ActorGroup {
                 Message& m = messages[i];
                 Account* a = m.target;
                 std::unique_lock<std::mutex> lock_to(a->mtx);
-                a->receive(m);
+                m.handler(*this, m, *a);
                 //TODO send messages over network.
             }
-            message_count = 0;
             messages.clear();
         }
 };
@@ -149,10 +157,8 @@ int main() {
             int target = actorGroup.actors[i].target;
             int transfer = rand(rng);
 
-            int remainder = transfer;
-            int amount_over_balance = 0;
-
-            actorGroup.process(actorGroup.actors[i], [&remainder, &transfer](Account& account) {
+            actorGroup.process(actorGroup.actors[i], [&actorGroup, &transfer, &i](Account& account) {
+                int remainder = transfer;
                 if(account.balance - transfer >= 0) {
                     account.balance -= transfer;
                 } else {
@@ -160,20 +166,19 @@ int main() {
                     account.balance = 0;
                 }
                 account.reserved += remainder;
-            });
-
-            actorGroup.process(actorGroup.actors[target], [&remainder, &amount_over_balance](Account& target) {
-                if(target.balance + remainder < target.max_balance) {
-                    target.balance += remainder;
-                } else {
-                    amount_over_balance = target.balance + remainder - target.max_balance;
-                    target.balance = target.max_balance;
-                }
-            });
-
-            actorGroup.process(actorGroup.actors[i], [&remainder, &amount_over_balance](Account& account) {
-                account.balance += amount_over_balance;
-                account.reserved -= remainder;
+                actorGroup.send_message(Message(&actorGroup.actors[account.target], &account, remainder, 0, [](ActorGroup& actorGroup, Message& m, Account& target) {
+                    int amount_over_balance = 0;
+                    if(target.balance + m.remainder < target.max_balance) {
+                        target.balance += m.remainder;
+                    } else {
+                        amount_over_balance = target.balance + m.remainder - target.max_balance;
+                        target.balance = target.max_balance;
+                    }
+                    actorGroup.send_message(Message(m.sender, &target, m.remainder, amount_over_balance, [](ActorGroup& actorGroup, Message& m, Account& account) {
+                        account.balance += m.amount_over_balance;
+                        account.reserved -= m.remainder;
+                    }));
+                }));
             });
         }
     }
