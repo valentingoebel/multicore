@@ -7,6 +7,7 @@
 
 class Message;
 class ActorGroup;
+class Mailbox;
 
 class Account {
 public:
@@ -48,7 +49,7 @@ class Message {
             Account* sender,
             int remainder,
             int amount_over_balance,
-            void (*handler)(ActorGroup& actorGroup, Message& m, Account& target)) :
+            void (*handler)(Mailbox& mailbox, Message& m, Account& target)) :
             target(target),
             sender(sender),
             remainder(remainder),
@@ -58,26 +59,26 @@ class Message {
         Account* sender;
         int remainder;
         int amount_over_balance;
-        void (*handler)(ActorGroup& actorGroup, Message& m, Account& target);
+        void (*handler)(Mailbox& mailbox, Message& m, Account& target);
 };
 
-class ActorGroup {
+class Mailbox {
     public:
-        ActorGroup() : actors(10000000, Account()) {
-            local_messages.reserve(10);
-        }
-        std::vector<Account> actors; //TODO support multiple types of actors, messages, etc
+        ActorGroup& actorGroup;
         std::vector<Message> messages;
         std::vector<Message> local_messages; //TODO threadlocal message boxes
-        mutable std::mutex mtx;
 
         int message_count = 0;
+
+        Mailbox(ActorGroup& actorGroup) : actorGroup(actorGroup) {}
 
         template<typename Functor>
         void process(Account& actor, Functor function)
         {
-            std::unique_lock<std::mutex> lock_to(actor.mtx);
-            function(actor);
+            {
+                std::unique_lock<std::mutex> lock_to(actor.mtx);
+                function(actor);
+            }
             if(message_count == 0) {
                 return;
             }
@@ -120,18 +121,26 @@ class ActorGroup {
         }
 };
 
+class ActorGroup {
+    public:
+        ActorGroup() : actors(10000000, Account()) {
+        }
+        std::vector<Account> actors; //TODO support multiple types of actors, messages, etc
+};
+
 int main() {
     int max_count = 10000000;
     ActorGroup actorGroup;
 
     #pragma omp parallel
     {
+        Mailbox mailbox(actorGroup);
         std::random_device rd;
         std::mt19937 rng(rd());
         std::uniform_int_distribution<int> rand(0, max_count - 1);
         #pragma omp for
         for(int i = 0; i < max_count; i++) {
-            actorGroup.process(actorGroup.actors[i], [&rand, &rng](Account& account) {
+            mailbox.process(actorGroup.actors[i], [&rand, &rng](Account& account) {
                 account.target = rand(rng);
             });
         }
@@ -152,12 +161,15 @@ int main() {
         std::random_device rd;
         std::mt19937 rng(rd());
         std::uniform_int_distribution<int> rand(0, 10);
+
+        Mailbox mailbox(actorGroup);
+
         #pragma omp for
         for(int i = 0; i < actorGroup.actors.size(); i++) {
             int target = actorGroup.actors[i].target;
             int transfer = rand(rng);
 
-            actorGroup.process(actorGroup.actors[i], [&actorGroup, &transfer, &i](Account& account) {
+            mailbox.process(actorGroup.actors[i], [&transfer, &i, &mailbox](Account& account) {
                 int remainder = transfer;
                 if(account.balance - transfer >= 0) {
                     account.balance -= transfer;
@@ -166,7 +178,7 @@ int main() {
                     account.balance = 0;
                 }
                 account.reserved += remainder;
-                actorGroup.send_message(Message(&actorGroup.actors[account.target], &account, remainder, 0, [](ActorGroup& actorGroup, Message& m, Account& target) {
+                mailbox.send_message(Message(&mailbox.actorGroup.actors[account.target], &account, remainder, 0, [](Mailbox& mailbox, Message& m, Account& target) {
                     int amount_over_balance = 0;
                     if(target.balance + m.remainder < target.max_balance) {
                         target.balance += m.remainder;
@@ -174,7 +186,7 @@ int main() {
                         amount_over_balance = target.balance + m.remainder - target.max_balance;
                         target.balance = target.max_balance;
                     }
-                    actorGroup.send_message(Message(m.sender, &target, m.remainder, amount_over_balance, [](ActorGroup& actorGroup, Message& m, Account& account) {
+                    mailbox.send_message(Message(m.sender, &target, m.remainder, amount_over_balance, [](Mailbox& mailbox, Message& m, Account& account) {
                         account.balance += m.amount_over_balance;
                         account.reserved -= m.remainder;
                     }));
